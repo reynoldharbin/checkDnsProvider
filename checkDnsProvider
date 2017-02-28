@@ -1,0 +1,312 @@
+#!/bin/bash
+
+########################################################################################################################
+#
+#	SCRIPTS:  checkDnsProvider
+#	USAGE:	  checkDnsProvider [DOMAINFILE]
+#				   (optional)
+#
+#	DESCRIPTION:  checkDnsProvider takes an input file of domains and identifies information about name servers,
+#		      DNS providers, and certain information about the web server used by that domain,  Information
+#		      identified includes:
+#			- Number of name servers resolving the domain
+#			- Number of DNS providers used by the domain
+#			- Type of Web Server used by the domain, which helps identify if a CDN is being used by the domain
+#			- 	inspects the HTTP HEADERS 'Server' and 'Via' from the HTTP response
+#
+#	REQUIREMENTS:	You will need the following tools available in your environment:
+#
+#				dig	- used to interrogate DNS name servers
+#				curl	- used to transfer data from or to a server, including HTTP GET or HEAD requests used here
+#
+#			Make sure the 'NSDomains' file is in your local directory.  NSDomains maps certain name server domains to specific DNS providers
+#
+#			Please set the HOMEDIR variable below to your local directory where the script is located
+#
+#	OUTPUT:	The script outputs a CSV file listing domains, number of name servers, number of DNS providers, and HTTP header info.  
+#		This CSV file can be imported into excel for easy filtering and analysis
+#
+#		The script also outputs a detailed log file, and an error file identifying name server domains not currently mapped to a DNS provider
+#
+#	QUESTIONS: Feel free to contact me at rharbin@gmail.com
+#		   http://reynold.harbin.io
+#
+########################################################################################################################
+
+
+# >>>>>>>
+# VARIABLES - PLEASE MODIFY FOR OUR ENVIRONMENT
+DATE=`date +%Y-%m-%d`
+HOMEDIR=/pathToYourDomainsFile/testDomains
+NSDOMAINSFILE=$HOMEDIR/NSDomains
+# >>>>>>>
+
+# FUNCTIONS
+
+# function that passes aNameServer, aNSDomain, aDNSProviderName and returns the name of the DNS provider
+function checkDNSProvider () {
+	funcNameServer=$1;
+	funcNameServerDomain=$2;
+	funcDNSProviderName=$3;
+		
+	if (echo $funcNameServer | grep -q "$funcNameServerDomain" ); then
+		#debugOut " -> RETURNING 0 : NAMESERVER:$funcNameServer FOUND, DOMAIN:$funcNameServerDomain, PROVIDER:$funcDNSProviderName" 
+		return 0
+	else
+		#debugOut " -> RETURNING 1 : NAMESERVER:$funcNameServer NOT FOUND, DOMAIN:$funcNameServerDomain, PROVIDER:$funcDNSProviderName"  
+		return 1
+	fi
+}
+
+# function that passes aList and aItem, and returns 0 if matched, and 1 if not found
+function contains () {
+    [[ $1 =~ $2 ]] && return 0 || return 1
+}
+
+# function to check web server used by response host
+function checkWebServer () {
+	pageToTest=$1;
+
+	HTTPServerHeaderResponse=`curl -I -H 'Cache control: no-cache' $pageToTest | grep -Fi Server | tr -d '\b\r' | head -n 1` >&2
+	HTTPViaHeaderResponse=`curl -I -H 'Cache control: no-cache' $pageToTest | grep -Fi Via | tr -d '\b\r' | head -n 1` >&2
+
+	echo "HTTPHeaderServer:$HTTPServerHeaderResponse | HTTPViaHeader:$HTTPViaHeaderResponse"
+}
+
+# function to check HTTP Header:Server returned by web server
+function checkHTTPServerHeader () {
+	pageToTest=$1;
+
+	HTTPServerHeaderResponse=`curl -I -H 'Cache control: no-cache' $pageToTest | grep -Fi Server | tr -d '\b\r' | head -n 1` >&2
+	echo "$HTTPServerHeaderResponse"
+}
+
+# function to check HTTP Header:Via returned by web server
+function checkHTTPViaHeader () {
+	pageToTest=$1;
+
+	HTTPViaHeaderResponse=`curl -I -H 'Cache control: no-cache' $pageToTest | grep -Fi Via | tr -d '\b\r' | head -n 1` >&2
+	echo "$HTTPViaHeaderResponse"
+}
+
+# function to log to console and log file
+function printOut () {
+	stuffToPrint=$1;
+	
+	echo "$stuffToPrint" >&2
+	echo "$stuffToPrint" >> $OUTPUTFILE
+}
+
+# function to log debug details to console and debug log file
+function debugOut () {
+	stuffToPrint=$1;
+	
+	echo "$stuffToPrint" >&2
+	echo "$stuffToPrint" >> $DEBUGOUTFILE
+}
+
+# function to log errors
+function errOut () {
+	stuffToPrint=$1;
+	
+	#echo "$stuffToPrint" >&2
+	echo "$stuffToPrint" >> $ERROUTPUTFILE
+}
+
+# function to init DNS provider names
+function initNsProviders () {
+	UltraDNS="-"
+	Akamai="-"
+	Dyn="-"
+	Amazon="-"
+	dnsMadeEasy="-"
+	Cloudflare="-"
+	easyDNS="-"
+	Edgecast="-"
+	NSONE="-"
+	Verisign="-"
+	Other="-"
+}
+
+# INPUT HANDLING AND SETTING REMAINING VARIABLES
+if [ -z "$1" ]
+  	then
+		FILE=RSA2017Sponsors
+		#FILE=testHosts
+		#FILE=thorsCustomers
+		#FILE=fortune1000
+		#FILE=alexa10K
+		#FILE=ultraTop100
+			
+		DOMAINFILE=$HOMEDIR/$FILE
+		OUTPUTFILE=$HOMEDIR/$FILE.$DATE.csv
+		DEBUGOUTFILE=$HOMEDIR/$FILE.$DATE.debug.log
+		ERROUTPUTFILE=$HOMEDIR/$FILE.$DATE.error.log
+		debugOut "FILE set to $FILE (no input parameters)"
+	else
+		FILE=$1
+		if [ -f $HOMEDIR/$FILE ] ; then
+			DOMAINFILE=$HOMEDIR/$FILE
+			OUTPUTFILE=$HOMEDIR/$FILE.$DATE.csv
+			DEBUGOUTFILE=$HOMEDIR/$FILE.$DATE.debug.log
+			ERROUTPUTFILE=$HOMEDIR/$FILE.$DATE.error.log
+			debugOut "FILE set to input parameter: $FILE"
+			debugOut ".... found input file $FILE"
+		else
+			echo ".... $FILE NOT FOUND, no domains to process, exiting...."
+			exit 1
+		fi
+fi
+
+# HOUSEKEEPING and INIT
+clear
+
+if [ -f $OUTPUTFILE ] ; then
+	debugOut ".... initializing output file $OUTPUTFILE"	
+	rm $OUTPUTFILE
+fi
+
+if [ -f $DEBUGOUTFILE ] ; then
+	debugOut ".... initializing debug file $DEBUGOUTFILE"	
+	rm $DEBUGOUTFILE
+fi
+
+if [ -f $ERROUTPUTFILE ] ; then
+	debugOut ".... initializing error file $ERROUTPUTFILE"	
+	rm $ERROUTPUTFILE
+fi
+
+
+echo ""
+
+COUNT=0
+initNsProviders
+printOut "Number, customerName, nameServerCount, dnsProviderCount, UltraDNS, Akamai, Dyn, Amazon, dnsMadeEasy, Cloudflare, easyDNS, Edgecast, NSONE, Verisign, Other, dnsProviderNames, HTTPHeaderServer, HTTPHeaderVia"
+	
+#START
+
+cat $DOMAINFILE | while read line
+do
+	debugOut "========================================="
+	debugOut "PROCESSING: | $COUNT. $line"
+	
+	SOA_RECORD=`dig soa "$line" | grep SOA | tail -1 | grep -v grep | awk '{print $5 }'`
+	NS_RECORDS=`dig $line ns $SOA_RECORD |grep IN | grep NS | awk '{print $5 }'`
+				
+	pageToLoad="http://www.$line"	
+	#WEBSERVER=$(checkWebServer "$pageToLoad")
+	HTTPSERVERHEADER=$(checkHTTPServerHeader "$pageToLoad")
+	HTTPVIAHEADER=$(checkHTTPViaHeader "$pageToLoad")
+	
+	debugOut "  -> SOA_RECORD: | $SOA_RECORD"
+	debugOut "  -> NS_RECORDS: | $NS_RECORDS"
+	
+	COUNT=$((COUNT+1))
+
+	NUMBER=$COUNT
+	CUSTOMER=$line
+	DNSPROVIDERCOUNT=0
+	NAMESERVERCOUNT=0
+	DNSPROVIDERNAMES=""	
+ 
+	for i in $NS_RECORDS; do
+		LOOP=Y
+		while [ "$LOOP" == "Y" ]
+		do
+			DOMAINSTOCHECK=`cat $NSDOMAINSFILE | wc -l`
+			DOMAINCOUNTER=1
+			
+			#cat $NSDOMAINSFILE | while read domain
+			while read domain
+			do
+				providerToPass=`echo $domain | cut -d" " -f1`	
+				domainToPass=`echo $domain | cut -d" " -f2`	
+				
+				DNSProvider=`checkDNSProvider $i $domainToPass $providerToPass`
+				DNSProviderReturnVal=$? # '$?' is the return value of the previous command
+
+				if [ $DNSProviderReturnVal -eq 0 ]
+				then
+
+					#add case
+
+					#UltraDNS, Akamai, Dyn, Amazon, dnsMadeEasy, Cloudflare, easyDNS, Edgecast, NSONE, Verisign, Other, dnsProviderNames
+
+					case "$providerToPass" in
+
+					UltraDNS)  	UltraDNS=UltraDNS
+						;;
+					Akamai)  	Akamai=Akamai
+    						;;
+					Dyn)  		Dyn=Dyn
+    						;;
+					Amazon)  	Amazon=Amazon
+    						;;
+					dnsMadeEasy)  	dnsMadeEasy=dnsMadeEasy
+    						;;
+					Cloudflare)  	Cloudflare=Cloudflare
+    						;;
+					easyDNS)  	easyDNS=easyDNS
+    						;;
+					Edgecast)  	Edgecast=Edgecast
+    						;;
+					NSONE)  	NSONE=NSONE
+    						;;
+					Verisign)  	Verisign=Verisign
+    						;;
+					*) 	   	Other=DIY
+   						;;
+					esac
+
+					if (contains "$DNSPROVIDERNAMES" $providerToPass) 
+					then
+						joe=1
+						#errOut " ->$providerToPass is already in DNSPROVIDERNAMES:$DNSPROVIDERNAMES "
+					else
+						DNSPROVIDERCOUNT=$((DNSPROVIDERCOUNT+1))
+						DNSPROVIDERNAMES="$DNSPROVIDERNAMES $providerToPass |"
+					fi
+
+		  			break
+				else
+					DOMAINCOUNTER=$((DOMAINCOUNTER+1))
+					if [ $DOMAINCOUNTER -gt $DOMAINSTOCHECK ] 
+					then
+					
+						if (contains "$DNSPROVIDERNAMES" DIY) 
+						then
+							joe=2
+							#errOut " ->DIY is already in DNSPROVIDERNAMES:$DNSPROVIDERNAMES "
+						else
+							DNSPROVIDERCOUNT=$((DNSPROVIDERCOUNT+1))
+							DNSPROVIDERNAMES="$DNSPROVIDERNAMES DIY"
+							Other="DIY"
+
+						fi
+					
+						NAMESERVERIP=`dig $i +short | head -n1`	
+						NAMESERVERORGNAME=`whois $NAMESERVERIP | grep OrgName | head -n1 | cut -d: -f2`
+						errOut " ->$i, NOT FOUND, CUSTOMER:$CUSTOMER, NameServerIP:$NAMESERVERIP, OrgName:$NAMESERVERORGNAME"
+		  				break
+					fi
+				fi
+			done < <(cat $NSDOMAINSFILE ) 	
+
+			LOOP=N
+		done
+		
+		NAMESERVERCOUNT=$((NAMESERVERCOUNT+1))
+ 	done
+	
+	printOut "$NUMBER, $CUSTOMER, $NAMESERVERCOUNT, $DNSPROVIDERCOUNT, $UltraDNS, $Akamai, $Dyn, $Amazon, $dnsMadeEasy, $Cloudflare, $easyDNS, $Edgecast, $NSONE, $Verisign, $Other, $DNSPROVIDERNAMES, Server:$HTTPSERVERHEADER, Via:$HTTPVIAHEADER"
+	initNsProviders
+done
+
+echo ""
+echo "-->  +++++++++++++++++++++++++++++ <--"
+echo "-->   OUTPUTFILE    : $OUTPUTFILE "
+echo "-->   DEBUGOUTFILE  : $DEBUGOUTFILE "
+echo "-->   ERROUTPUTFILE : $ERROUTPUTFILE "
+echo "-->  +++++++++++++++++++++++++++++ <--"
+echo "-->"
+echo "--> DONE <--"
